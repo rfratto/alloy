@@ -1,0 +1,20 @@
+name: Run Go fuzz tests (PR)
+on:
+  pull_request:
+jobs:
+  find-tests:
+    name: Find fuzz tests
+    uses: ./.github/workflows/fuzz-find-go.yml
+
+  fuzz:
+    name: "${{ matrix.package }}: ${{ matrix.function }}"
+    needs: [find-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.find-tests.outputs.tests) }}
+    uses: ./.github/workflows/fuzz-run-go.yml
+    with:
+      package-path: ${{ matrix.package }}
+      test-name: ${{ matrix.function }}
+      fuzz-time: 5s

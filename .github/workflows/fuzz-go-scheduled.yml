@@ -1,0 +1,70 @@
+name: Run Go fuzz tests (scheduled)
+on:
+  workflow_dispatch: {}
+jobs:
+  find-tests:
+    name: Find fuzz tests
+    uses: ./.github/workflows/fuzz-find-go.yml
+
+  fuzz:
+    name: "${{ matrix.package }}: ${{ matrix.function }}"
+    runs-on: ubuntu-latest
+    needs: [find-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.find-tests.outputs.tests) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Run fuzz test
+        id: fuzz
+        uses: ./.github/workflows/fuzz-run-go.yml
+        with:
+          package-path: ${{ matrix.package }}
+          test-name: ${{ matrix.function }}
+          fuzz-time: 5s
+
+      - name: Create new issue
+        if: ${{ failure() && steps.fuzz.outputs.failure-name != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failureName = "${{ steps.fuzz.outputs.failure-name }}";
+            const issueTitle = `${{ matrix.package }}: ${{ matrix.function }} failed (${failureName})`;
+
+            // Look for existing issue first with the same title.
+            const issues = await github.rest.search.issuesAndPullRequests({
+              q: `is:issue is:open repo:${context.repo.owner}/${context.repo.repo} in:title "${failureName}"`
+            })
+            console.log(issues);
+            const issue = issues.data.items.find((issue) => issue.title === issue.title);
+            if (issue) {
+              return;
+            }
+
+            // Create a new issue.
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: `
+            A new fuzz test failure was found in <code>${{ matrix.package }}</code>.
+
+            To reproduce the failure locally, run the following command using the GitHub CLI to download the corpus entry:
+
+            <pre lang="bash">gh run download --repo ${{ github.repository }} ${{ github.run_id }} -n ${{ steps.fuzz.outputs.artifact-name }} --dir ${{ steps.fuzz.outputs.failure-path }}</pre>
+
+            When opening a PR with the fix, please include in the corpus entry in your commit to prevent regressions.
+
+            [Link to failed run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            `,
+
+              labels: ['bug'],
+            })

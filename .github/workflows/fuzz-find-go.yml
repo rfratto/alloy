@@ -1,0 +1,61 @@
+# Find Go fuzz tests is a reusable workflow that will find all Go fuzz tests in
+# a given directory.
+#
+# This workflow assumes that the code has been checked out.
+#
+# The output is a JSON array of objects with two keys:
+#   * package: The package path of the test, relative to the search directory.
+#   * function: The name of the fuzz function within the package.
+
+name: Find Go fuzz tests
+
+on:
+  workflow_call:
+    inputs:
+      directory:
+        description: "Directory to search for Go fuzz tests in."
+        default: '.'
+        required: false
+        type: string
+    outputs:
+      tests:
+        description: A JSON array of objects of tests, containing the keys "package" and "function".
+        value: "${{ jobs.find-tests.outputs.tests }}"
+
+jobs:
+  find-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.find-tests.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find fuzz tests
+        id: find-tests
+        run: |
+          TEST_FILES=$(find "${{ inputs.directory }}" -name '*_test.go' -not -path './vendor/*')
+
+          RESULTS=()
+
+          for FILE in $TEST_FILES; do
+            FUZZ_FUNC=$(grep -E 'func Fuzz\w*' $FILE | sed 's/func //' | sed 's/(.*$//')
+            if [ -z "$FUZZ_FUNC" ]; then
+              continue
+            fi
+
+            PACKAGE_PATH=$(dirname ${FILE#${{ inputs.directory }}/})
+            RESULTS+=("{\"package\":\"$PACKAGE_PATH\",\"function\":\"$FUZZ_FUNC\"}")
+
+            echo "Found $FUZZ_FUNC in $PACKAGE_PATH"
+          done
+
+          NUM_RESULTS=${#RESULTS[@]}
+          INCLUDE_STRING=""
+          for (( i=0; i<$NUM_RESULTS; i++ )); do
+            INCLUDE_STRING+="${RESULTS[$i]}"
+
+            if [[ $i -lt $(($NUM_RESULTS-1)) ]]; then
+              INCLUDE_STRING+=","
+            fi
+          done
+
+          echo 'tests=['$INCLUDE_STRING']' >> $GITHUB_OUTPUT

@@ -1,0 +1,114 @@
+# Run Go fuzz test is a reusable workflow that runs a single Go fuzz test.
+#
+# The workflow runs until fuzz-time has elapsed or a test case which causes the
+# test to fail is found. If a new failure is found, the workflow will fail and
+# upload the failing test case as an artifact.
+#
+# The workflow assumes that the code has already been checked out.
+
+name: Run Go fuzz test
+on:
+  workflow_call:
+    inputs:
+      package-path:
+        description: "Directory of the Go package to run a Fuzz test in."
+        required: true
+        type: string
+      test-name:
+        description: "Full name of the Fuzz test to run."
+        required: true
+        type: string
+      fuzz-time:
+        description: "Time to run the Fuzz test for. (for example, 5m)"
+        required: true
+        type: string
+
+    outputs:
+      arifact-name:
+        description: "Name of the artifact that was uploaded. Only use when the workflow fails."
+        value: ${{ jobs.fuzz.outputs.artifact-name }}
+      failure-name:
+        description: "Name of the test case that failed. Only use when the workflow fails."
+        value: ${{ jobs.fuzz.outputs.failure-name }}
+      failure-path:
+        description: "Path to place the failure artifact. Only use when the workflow fails."
+        value: ${{ inputs.package-path }}/testdata/fuzz/${{ inputs.test-name }}
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: failure-${{ steps.new-failure.outputs.package }}-${{ steps.new-failure.outputs.function }}
+      failure-name: ${{ steps.new-failure.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      - name: Find cache location
+        run:
+          echo "FUZZ_CACHE=$(go env GOCACHE)/fuzz" >> $GITHUB_ENV
+
+      - name: Restore fuzz cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FUZZ_CACHE }}
+          key: fuzz-${{ inputs.package-path }}-${{ inputs.test-name }}-${{ github.sha }}
+          restore-keys: |
+            fuzz-${{ inputs.package-path }}-${{ inputs.test-name }}-
+
+      - name: Fuzz
+        run: |
+          # Change directory to the package first, since go test doesn't
+          # support cross-module testing, and the provided directory may be in
+          # a different module.
+          cd "${{ inputs.package-path }}"
+          go test -fuzz="${{ inputs.test-name }}\$" -run="${{ inputs.test-name }}\$" -fuzztime="${{ inputs.fuzz-time }}" .
+
+      # Fuzzing may have failed because of an existing bug, or it may have
+      # found a new one and written a new corpus entry in testdata/ relative to
+      # the package.
+      #
+      # If that file was written, we should save it as an artifact and then
+      # create an issue.
+
+      - name: Check for new fuzz failure
+        id: new-failure
+        if: ${{ failure() }}
+        run: |
+          UNTRACKED=$(git ls-files . --exclude-standard --others)
+          if [ -z "$UNTRACKED" ]; then
+            exit 0
+          fi
+          echo "Found new fuzz failure: $UNTRACKED"
+          echo "file=$UNTRACKED" >> $GITHUB_OUTPUT
+          echo "name=$(basename $UNTRACKED)" >> $GITHUB_OUTPUT
+          echo "package=$(echo ${{ inputs.package-path }} | sed 's/\//_/g')" >> $GITHUB_OUTPUT
+          echo "function=${{ inputs.test-name }}" >> $GITHUB_OUTPUT
+
+      - name: Upload fuzz failure as artifact
+        id: artifact
+        if: ${{ failure() && steps.new-failure.outputs.file != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-${{ steps.new-failure.outputs.package }}-${{ steps.new-failure.outputs.function }}
+          path: ${{ steps.new-failure.outputs.file }}
+
+      - name: Generate reproduction instructions
+        if: ${{ failure() && steps.new-failure.outputs.file != '' }}
+        run: |
+          cat >>$GITHUB_STEP_SUMMARY <<EOF
+          ## Fuzz test failed
+
+          A new fuzz test failure was found in ${{ inputs.package-path }}.
+
+          To reproduce the failure locally, run the following command using the GitHub CLI to download the failed test case:
+
+          <pre lang="bash">gh run download --repo ${{ github.repository }} ${{ github.run_id }} -n failure-${{ steps.new-failure.outputs.package }}-${{ steps.new-failure.outputs.function }} --dir ${{ inputs.package-path }}/testdata/fuzz/${{ inputs.test-name }}</pre>
+
+          When opening a PR with the fix, please include the test case file in your PR to prevent regressions.
+          EOF
