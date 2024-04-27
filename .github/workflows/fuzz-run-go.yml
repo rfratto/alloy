@@ -22,6 +22,11 @@ on:
         description: "Time to run the Fuzz test for. (for example, 5m)"
         required: true
         type: string
+      create-issue:
+        description: "Whether an issue should be created for new failures."
+        required: false
+        default: false
+        type: boolean
 
     outputs:
       arifact-name:
@@ -70,8 +75,8 @@ jobs:
           go test -fuzz="${{ inputs.test-name }}\$" -run="${{ inputs.test-name }}\$" -fuzztime="${{ inputs.fuzz-time }}" .
 
       # Fuzzing may have failed because of an existing bug, or it may have
-      # found a new one and written a new corpus entry in testdata/ relative to
-      # the package.
+      # found a new one and written a new test case file in testdata/ relative
+      # to the package.
       #
       # If that file was written, we should save it as an artifact and then
       # create an issue.
@@ -112,3 +117,40 @@ jobs:
 
           When opening a PR with the fix, please include the test case file in your PR to prevent regressions.
           EOF
+
+      - name: Create new issue
+        if: ${{ failure() && steps.new-failure.outputs.file != '' && inputs.create-issue }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failureName = "${{ steps.new-failure.outputs.name }}";
+            const issueTitle = `${{ inputs.package-path }}: ${{ inputs.test-name }} failed (${failureName})`;
+
+            // Look for existing issue first with the same title.
+            const issues = await github.rest.search.issuesAndPullRequests({
+              q: `is:issue is:open repo:${{ github.repository }} in:title "${failureName}"`
+            })
+            const issue = issues.data.items.find((issue) => issue.title === issue.title);
+            if (issue) {
+              return;
+            }
+
+            // Create a new issue.
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: `
+            A new fuzz test failure was found in <code>${{ inputs.package-path }}</code>.
+
+            To reproduce the failure locally, run the following command using the GitHub CLI to download the failed test case:
+
+            <pre lang="bash">gh run download --repo ${{ github.repository }} ${{ github.run_id }} -n failure-${{ steps.new-failure.outputs.package }}-${{ steps.new-failure.outputs.function }} --dir ${{ inputs.package-path }}/testdata/fuzz/${{ inputs.test-name }}</pre>
+
+            When opening a PR with the fix, please include the test case file in your PR to prevent regressions.
+
+            [Link to failed run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            `,
+
+              labels: ['bug'],
+            })
